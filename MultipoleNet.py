@@ -68,6 +68,11 @@ class MultipoleNetRes(tf.keras.Model):
             node_model_fn=lambda: ff_module(self.node_size, 1),          
         )
         
+        self.embedding_octu = gn.modules.GraphIndependent(
+            edge_model_fn=lambda: ff_module(self.edge_size, 1),
+            node_model_fn=lambda: ff_module(self.node_size, 1),          
+        )
+        
         self.gns_mono = [gn.modules.InteractionNetwork( 
                          edge_model_fn=lambda: ff_module(self.edge_size, 2),
                          node_model_fn=lambda: ff_module(self.node_size, 2)) 
@@ -83,26 +88,36 @@ class MultipoleNetRes(tf.keras.Model):
                          node_model_fn=lambda: ff_module(self.node_size, 2)) 
                          for _ in range(self.num_steps)]
 
+        self.gns_octu = [gn.modules.InteractionNetwork( 
+                         edge_model_fn=lambda: ff_module(self.edge_size, 2),
+                         node_model_fn=lambda: ff_module(self.node_size, 2)) 
+                         for _ in range(self.num_steps)]
+
         self.mono = ff_module_terminal(self.node_size, 2, 1)
         self.dipo = ff_module_terminal(self.node_size, 2, 1)
         self.quad = ff_module_terminal(self.node_size, 2, 1)
+        self.octu = ff_module_terminal(self.node_size, 2, 1)
  
     def update(self, graphs):   
         initial_nodes = graphs.nodes
         graphs_mono = self.embedding_mono(graphs)
         graphs_dipo = self.embedding_dipo(graphs)
-        graphs_quad = self.embedding_quad(graphs)        
-        for layer_mono, layer_dipo, layer_quad in zip(self.gns_mono, self.gns_dipo, self.gns_quad):
+        graphs_quad = self.embedding_quad(graphs)
+        graphs_octu = self.embedding_octu(graphs)
+        for layer_mono, layer_dipo, layer_quad, layer_octu in zip(self.gns_mono, self.gns_dipo, self.gns_quad, self.gns_octu):
             nodes_mono = graphs_mono.nodes
             nodes_dipo = graphs_dipo.nodes
             nodes_quad = graphs_quad.nodes
+            nodes_octu = graphs_octu.nodes
             graphs_mono = layer_mono(graphs_mono)
             graphs_dipo = layer_dipo(graphs_dipo)
-            graphs_quad = layer_quad(graphs_quad)            
+            graphs_quad = layer_quad(graphs_quad)
+            graphs_octu = layer_octu(graphs_octu)
             graphs_mono = graphs_mono.replace(nodes=graphs_mono.nodes + nodes_mono)    
             graphs_dipo = graphs_dipo.replace(nodes=graphs_dipo.nodes + nodes_dipo)    
-            graphs_quad = graphs_quad.replace(nodes=graphs_quad.nodes + nodes_quad)          
-        return graphs_mono, graphs_dipo, graphs_quad
+            graphs_quad = graphs_quad.replace(nodes=graphs_quad.nodes + nodes_quad)
+            graphs_octu = graphs_octu.replace(nodes=graphs_octu.nodes + nodes_octu)
+        return graphs_mono, graphs_dipo, graphs_quad, graphs_octu
     
     def monopoles(self, graphs_mono):
         monopoles = self.mono(graphs_mono.nodes)
@@ -122,16 +137,29 @@ class MultipoleNetRes(tf.keras.Model):
         quad_features_receivers = tf.gather(graphs_quad.nodes, graphs_quad.receivers)
         features_quad = tf.concat((quad_features_senders, quad_features_receivers, edge_features), axis=-1)
         weighted_outer_products = outer_products * tf.expand_dims(self.quad(features_quad), axis=-1)
-        return tf.math.unsorted_segment_sum(weighted_outer_products, graphs_quad.receivers, num_segments=tf.reduce_sum(graphs_quad.n_node))        
+        return tf.math.unsorted_segment_sum(weighted_outer_products, graphs_quad.receivers, num_segments=tf.reduce_sum(graphs_quad.n_node))
+    
+    def octupoles(self, graphs_octu, edge_features, vectors):
+        octu_products = get_octupole_products(vectors)  # [N_edges, 3, 3, 3, 3]
+        octu_features_senders = tf.gather(graphs_octu.nodes, graphs_octu.senders)
+        octu_features_receivers = tf.gather(graphs_octu.nodes, graphs_octu.receivers)
+        features_octu = tf.concat((octu_features_senders, octu_features_receivers, edge_features), axis=-1)
+        # Expand weights to match octupole tensor dimensions [N_edges, 3, 3, 3, 3]
+        weights = self.octu(features_octu)  # [N_edges, 1]
+        weights_expanded = tf.expand_dims(tf.expand_dims(tf.expand_dims(weights, axis=-1), axis=-1), axis=-1)  # [N_edges, 1, 1, 1, 1]
+        weighted_octu_products = octu_products * weights_expanded  # [N_edges, 3, 3, 3, 3]
+        # Sum over edges to get [N_atoms, 3, 3, 3, 3]
+        return tf.math.unsorted_segment_sum(weighted_octu_products, graphs_octu.receivers, num_segments=tf.reduce_sum(graphs_octu.n_node))        
     
     def call(self, graphs, coordinates):
         initial_edges = graphs.edges
         vectors = tf.gather(coordinates, graphs.senders) - tf.gather(coordinates, graphs.receivers)
-        graphs_mono, graphs_dipo, graphs_quad = self.update(graphs)
+        graphs_mono, graphs_dipo, graphs_quad, graphs_octu = self.update(graphs)
         monopoles = self.monopoles(graphs_mono)
         dipoles = self.dipoles(graphs_dipo, initial_edges, vectors)
         quadrupoles = self.quadrupoles(graphs_quad, initial_edges, vectors)
-        return monopoles, dipoles, quadrupoles
+        octupoles = self.octupoles(graphs_octu, initial_edges, vectors)
+        return monopoles, dipoles, quadrupoles, octupoles
     
     def predict(self, coordinates, elements):
         graph = build_graph(coordinates, elements)
@@ -141,10 +169,54 @@ class MultipoleNetRes(tf.keras.Model):
 def get_outer_products(vectors):
     vectors = tf.expand_dims(vectors, axis=-1)
     return D_Q(vectors * tf.linalg.matrix_transpose(vectors))
+
+@tf.function(input_signature=[tf.TensorSpec(shape=[None, 3], dtype=dtype)])
+def get_octupole_products(vectors):
+    # Create 4th order tensor (octupole)
+    v_expanded_1 = tf.expand_dims(vectors, axis=-1)  # [N, 3, 1]
+    v_expanded_2 = tf.expand_dims(vectors, axis=-2)  # [N, 1, 3]
+    v_expanded_3 = tf.expand_dims(vectors, axis=-1)  # [N, 3, 1]
+    v_expanded_4 = tf.expand_dims(vectors, axis=-2)  # [N, 1, 3]
+    
+    # Compute outer product: v_i v_j v_k v_l
+    outer_ij = v_expanded_1 * v_expanded_2  # [N, 3, 3]
+    outer_kl = v_expanded_3 * v_expanded_4  # [N, 3, 3]
+    
+    # Expand dimensions for final outer product
+    outer_ij = tf.expand_dims(tf.expand_dims(outer_ij, axis=-1), axis=-1)  # [N, 3, 3, 1, 1]
+    outer_kl = tf.expand_dims(tf.expand_dims(outer_kl, axis=1), axis=1)    # [N, 1, 1, 3, 3]
+    
+    # Final 4th order tensor
+    octupole_tensor = outer_ij * outer_kl  # [N, 3, 3, 3, 3]
+    
+    return D_O(octupole_tensor)
     
 @tf.function(experimental_relax_shapes=True)    
 def D_Q(quadrupoles):
     return tf.linalg.set_diag(quadrupoles, tf.linalg.diag_part(quadrupoles) - tf.expand_dims((tf.linalg.trace(quadrupoles) / 3), axis=-1))
+
+@tf.function(experimental_relax_shapes=True)    
+def D_O(octupoles):
+    # Simplified detracing for octupoles
+    # For a 4th-order tensor, we subtract traces over all pairs of indices
+    # This is a simplified implementation - full detracing would be more complex
+    
+    delta = tf.eye(3, dtype=dtype)
+    
+    # Remove trace over first pair of indices (i,j)
+    trace_ij = tf.einsum('niikl->nkl', octupoles)  # Sum over i=j
+    correction_ij = tf.einsum('ij,nkl->nijkl', delta, trace_ij) / 3.0
+    octupoles = octupoles - correction_ij
+    
+    # Remove trace over second pair of indices (k,l)  
+    trace_kl = tf.einsum('nijkk->nij', octupoles)  # Sum over k=l
+    correction_kl = tf.einsum('kl,nij->nijkl', delta, trace_kl) / 3.0
+    octupoles = octupoles - correction_kl
+    
+    # Additional detracing could be added for other index pairs if needed
+    # For now, this provides basic detracing functionality
+    
+    return octupoles
 
 def triweight(k, m):
     return tf.math.pow(1 - (k/m) ** 2, 3)
@@ -194,8 +266,10 @@ def load_model():
                         tf.train.Checkpoint(module=model.embedding_dipo),
                         tf.train.Checkpoint(module=model.dipo),
                         tf.train.Checkpoint(module=model.embedding_quad),
-                        tf.train.Checkpoint(module=model.quad),])
-    names = ['_embedding_mono', '_mono', '_embedding_dipo', '_dipo', '_embedding_quad', '_quad']
+                        tf.train.Checkpoint(module=model.quad),
+                        tf.train.Checkpoint(module=model.embedding_octu),
+                        tf.train.Checkpoint(module=model.octu),])
+    names = ['_embedding_mono', '_mono', '_embedding_dipo', '_dipo', '_embedding_quad', '_quad', '_embedding_octu', '_octu']
     for idl, layer in enumerate(model.gns_mono):
         checkpoints.append(tf.train.Checkpoint(module=layer))
         names.append('_layer_mono' + str(idl))
@@ -204,8 +278,14 @@ def load_model():
         names.append('_layer_dipo' + str(idl))
     for idl, layer in enumerate(model.gns_quad):
         checkpoints.append(tf.train.Checkpoint(module=layer))
-        names.append('_layer_quad' + str(idl))       
+        names.append('_layer_quad' + str(idl))
+    for idl, layer in enumerate(model.gns_octu):
+        checkpoints.append(tf.train.Checkpoint(module=layer))
+        names.append('_layer_octu' + str(idl))       
     for idc, checkpoint in enumerate(checkpoints):
+        if '_octu' in names[idc] or '_layer_octu' in names[idc]:
+            # Skip loading octupole weights as they don't exist yet
+            continue
         checkpoint.restore(save_path + names[idc] + '-1').expect_partial()
     return model
     
