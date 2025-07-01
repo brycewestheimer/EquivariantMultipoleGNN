@@ -40,7 +40,30 @@ Extended the EquivariantMultipoleGNN model to predict octupole moments in additi
 - Gracefully handles missing octupole weights (for backward compatibility)
 - Maintains existing weight loading for monopole, dipole, and quadrupole components
 
-### 4. Notebook Updates (`how_to_use.ipynb`)
+### 4. Documentation Updates
+
+#### Enhanced README (`README.md`)
+- **Extended Description**: Added comprehensive overview of octupole functionality
+- **Feature Matrix**: Table showing all multipole orders and their tensor shapes
+- **Quick Start Guide**: Example code for octupole prediction
+- **Installation Instructions**: Updated requirements and setup
+- **Architecture Overview**: Description of extended model components
+- **Citation Information**: Proper attribution for extended functionality
+
+#### Comprehensive API Documentation (`API_DOCUMENTATION.md`)
+- **Complete Function Reference**: Detailed documentation for all classes and methods
+- **Usage Examples**: Code examples for all major operations
+- **Equivariance Properties**: Mathematical descriptions of tensor transformations
+- **Training Interface**: Full documentation of loss functions and training procedures
+- **Performance Guidelines**: Memory and computational considerations
+- **Error Handling**: Common issues and troubleshooting
+
+#### Changelog (`CHANGELOG.md`)
+- **Version 2.0.0**: Complete documentation of all changes
+- **Migration Guide**: Instructions for updating existing code
+- **Breaking Changes**: Clear documentation of API changes
+- **Technical Details**: In-depth explanation of new features
+- **Testing Results**: Validation of all new functionality
 
 #### Enhanced Examples:
 - Updated multipole prediction calls to handle 4-tuple return format
@@ -50,7 +73,17 @@ Extended the EquivariantMultipoleGNN model to predict octupole moments in additi
   O'_ijkl = R_im × R_jn × R_ko × R_lp × O_mnop
   ```
 
-### 5. Testing Infrastructure
+### 5. Notebook Updates (`how_to_use.ipynb`)
+
+#### Enhanced Examples:
+- Updated multipole prediction calls to handle 4-tuple return format
+- Added octupole shape visualization: `(n_atoms, 3, 3, 3, 3)`
+- Implemented octupole equivariance test using 4th-order tensor rotation:
+  ```python
+  O'_ijkl = R_im × R_jn × R_ko × R_lp × O_mnop
+  ```
+
+### 6. Testing Infrastructure
 
 #### New Test Files:
 - **`test_octupoles.py`**: Comprehensive octupole functionality testing
